@@ -53,6 +53,9 @@
 </head>
 <body>
 <div class="wrap">
+  <div style="text-align:center; margin-bottom:10px;">
+    <a class="navlink" id="homeLink" href="#">← Back to Home</a>
+  </div>
   <h1>⬆️ DWPS — Upload Packing List <span style="font-size:12px; color:#b5670c; font-weight:700; vertical-align:middle;">TEST</span></h1>
   <div class="sub">Recognizes tracking number / tracking ID / AWB as the same field, order ID / order SN as the same field, and Seller SKU / SKU Reference No. as the same item barcode field — regardless of the exact column names your marketplace export uses.</div>
 
@@ -60,7 +63,8 @@
   <script>
     const CONFIG = {
       CLIENT_ID: "635342812462-2a5m5u03fgj8tkm02vpvrii9ma7ljc1j.apps.googleusercontent.com",
-      SPREADSHEET_ID: "1-XBs3AFmqG4lMkU7LYQvukuMbu_vvCjH0c7vPpV1gk8"
+      SPREADSHEET_ID: "1-XBs3AFmqG4lMkU7LYQvukuMbu_vvCjH0c7vPpV1gk8",
+      HOME_URL: "https://script.google.com/a/deliprompt.com/macros/s/AKfycbxzva_perA-jCFFzHa9jUCnwrBUjk3AmReiyGRcEsmkh17F5p_lRvg27xuz1AQDktQPbw/exec"
     };
   </script>
   <!-- ===================================================================== -->
@@ -95,6 +99,8 @@
 // Code.gs's importPackingList() parsing/dedupe rules in JS. Keep this logic in
 // sync with Code.gs if you ever change the matching or synonym rules there.
 // ==========================================================================
+
+document.getElementById('homeLink').href = CONFIG.HOME_URL;
 
 let accessToken = null;
 let tokenClient = null;
@@ -459,5 +465,7 @@ function renderImportResult(res) {
   el.innerHTML = html;
 }
 </script>
+</body>
+</html>
 </body>
 </html>
