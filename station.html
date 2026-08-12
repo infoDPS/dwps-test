@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DWPS — Packing Station</title>
+<title>DWPS — Packing Station (TEST)</title>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root{
@@ -51,15 +51,15 @@
   <div style="text-align:center; margin-bottom:10px;">
     <a class="navlink" id="homeLink" href="#">← Back to Home</a>
   </div>
-  <h1>📦 DWPS — Packing Station</h1>
+  <h1>📦 DWPS — Packing Station <span style="font-size:12px; color:#b5670c; font-weight:700;">TEST</span></h1>
   <!-- ============ CONFIG — edit before uploading ============ -->
   <script>
     const CONFIG = {
       CLIENT_ID: "635342812462-2a5m5u03fgj8tkm02vpvrii9ma7ljc1j.apps.googleusercontent.com",
-      SPREADSHEET_ID: "1JMK7kB6FA2XmieLJ4wCGokSzTyBBCpSraUQbqwagZb4",
+      SPREADSHEET_ID: "1-XBs3AFmqG4lMkU7LYQvukuMbu_vvCjH0c7vPpV1gk8",
       STATION_NAMES: ["Station 1","Station 2","Station 3","Station 4","Station 5"],
-      DRIVE_FOLDER_ID: "1goutE3sQup_EXJzwsOdd45mr0VJDGy39", // Packing Videos folder — all uploads land here
-      HOME_URL: "PASTE_YOUR_APPS_SCRIPT_WEB_APP_EXEC_URL_HERE" // e.g. https://script.google.com/.../exec — the "Back to Home" link above
+      DRIVE_FOLDER_ID: "10T6saln6svtLEL5kk-sFa8Dyno4Yebg8",
+      HOME_URL: "https://script.google.com/a/deliprompt.com/macros/s/AKfycbxzva_perA-jCFFzHa9jUCnwrBUjk3AmReiyGRcEsmkh17F5p_lRvg27xuz1AQDktQPbw/exec"
     };
   </script>
   <!-- =========================================================== -->
@@ -124,10 +124,6 @@ operatorInput.value = localStorage.getItem('dwps_operator') || '';
 operatorInput.oninput = () => localStorage.setItem('dwps_operator', operatorInput.value);
 
 // ---------- Google Sign-In + token lifecycle ----------
-// Access tokens from Google Identity Services expire (~1hr). A station left open
-// for a full shift WILL hit this. We proactively refresh silently in the
-// background, and any API call that still hits a 401 triggers one retry after
-// a fresh token, so a scan never fails silently mid-shift.
 window.onload = () => {
   google.accounts.id.initialize({ client_id: CONFIG.CLIENT_ID, callback: () => {} });
   tokenClient = google.accounts.oauth2.initTokenClient({
@@ -143,8 +139,6 @@ window.onload = () => {
   btn.onclick = () => requestToken(true).then(onSignedIn).catch(err => alert('Sign-in failed: ' + (err.error || err.message || err)));
   document.getElementById('gsiButton').appendChild(btn);
 
-  // Background silent-refresh check every minute; refreshes once we're within
-  // 5 minutes of expiry, well before anything would actually fail.
   setInterval(() => {
     if (!signedIn) return;
     if (Date.now() > tokenExpiryAt - 5 * 60 * 1000) {
@@ -188,9 +182,6 @@ function authHeader() {
   return { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' };
 }
 
-// Wraps fetch: on a 401 (expired/invalid token), tries one silent refresh and
-// retries the request once before giving up. Every Sheets/Drive call in this
-// file goes through this so an expired token never just fails a scan outright.
 async function apiFetch(url, options) {
   let res = await fetch(url, options);
   if (res.status === 401) {
@@ -231,9 +222,6 @@ function showMsg(elId, text, ok) {
   if (!ok) playBuzzer();
 }
 
-// Synthesized reject buzzer (no external audio file needed) — fires on every
-// hard-stop failure (not found, not yet sorted, mismatch, camera error, upload
-// failure...) so it's unmistakable even if staff aren't looking at the screen.
 function playBuzzer() {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
