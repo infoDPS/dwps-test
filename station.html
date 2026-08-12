@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DWPS — Packing Station (TEST)</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+  :root{
+    --blue:#3b6fe0; --bg:#f4f5f7; --card:#ffffff; --danger:#c0392b; --danger-bg:#fdecea;
+    --ok:#1e8e3e; --text:#1a1a1a; --muted:#6b7280; --border:#e2e4e9;
+  }
+  *{box-sizing:border-box;}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+    background:var(--bg); margin:0; padding:24px 16px 60px; color:var(--text);
+  }
+  .wrap{max-width:520px; margin:0 auto;}
+  h1{font-size:22px; text-align:center; margin:0 0 20px;}
+  .card{background:var(--card); border-radius:14px; padding:20px; box-shadow:0 1px 3px rgba(0,0,0,.08); margin-bottom:16px;}
+  .row{display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;}
+  label{font-size:12px; font-weight:700; color:var(--muted); letter-spacing:.04em; text-transform:uppercase;}
+  select, input[type=text]{
+    width:100%; padding:14px; border:1px solid var(--border); border-radius:10px;
+    font-size:16px; margin-top:6px; background:#fafafa;
+  }
+  button{
+    width:100%; padding:15px; border:none; border-radius:10px; font-size:16px; font-weight:700;
+    cursor:pointer; margin-top:10px;
+  }
+  .btn-primary{background:var(--blue); color:#fff;}
+  .btn-primary:disabled{background:#a9b8dd; cursor:not-allowed;}
+  .btn-danger{background:var(--danger); color:#fff;}
+  .btn-secondary{background:#eceef2; color:var(--text);}
+  .msg{padding:14px; border-radius:10px; margin-top:14px; font-size:14px; text-align:center;}
+  .msg.error{background:var(--danger-bg); color:var(--danger);}
+  .msg.ok{background:#e6f4ea; color:var(--ok);}
+  .msg.warn{background:#fff4e5; color:#b5670c;}
+  video{width:100%; border-radius:10px; background:#000; margin-top:10px;}
+  .hidden{display:none !important;}
+  .muted{color:var(--muted); font-size:13px; text-align:center; margin-top:10px;}
+  .signin{display:flex; justify-content:center; margin-top:10px;}
+  .rec-dot{display:inline-block; width:10px; height:10px; background:var(--danger); border-radius:50%; margin-right:6px; animation:pulse 1s infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
+  #sessionBanner{position:sticky; top:0; z-index:10; margin-bottom:12px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📦 DWPS — Packing Station <span style="font-size:12px; color:#b5670c; font-weight:700;">TEST</span></h1>
+  <!-- ============ CONFIG — edit before uploading ============ -->
+  <script>
+    const CONFIG = {
+      CLIENT_ID: "635342812462-2a5m5u03fgj8tkm02vpvrii9ma7ljc1j.apps.googleusercontent.com",
+      SPREADSHEET_ID: "1-XBs3AFmqG4lMkU7LYQvukuMbu_vvCjH0c7vPpV1gk8",
+      STATION_NAMES: ["Station 1","Station 2","Station 3","Station 4","Station 5"],
+      DRIVE_FOLDER_ID: "10T6saln6svtLEL5kk-sFa8Dyno4Yebg8"
+    };
+  </script>
+  <!-- =========================================================== -->
+  <div id="sessionBanner"></div>
+  <div id="signinCard" class="card">
+    <div class="muted">Sign in with your work Google account to begin.</div>
+    <div id="gsiButton" class="signin"></div>
+  </div>
+  <div id="appCard" class="hidden">
+    <div class="card">
+      <div class="row">
+        <div style="flex:1;">
+          <label>Station</label>
+          <select id="stationSelect"></select>
+        </div>
+      </div>
+      <label>Operator name</label>
+      <input type="text" id="operatorInput" placeholder="Your name">
+    </div>
+    <div class="card">
+      <label>1. Scan AWB tracking number</label>
+      <input type="text" id="trackingInput" placeholder="Scan or type tracking number">
+      <button class="btn-primary" id="verifyBtn">Verify</button>
+      <div id="verifyMsg"></div>
+    </div>
+    <div class="card hidden" id="recordCard">
+      <label>2. Record packing video (video only, no audio)</label>
+      <video id="preview" autoplay muted playsinline></video>
+      <button class="btn-danger hidden" id="startRecBtn">● Start Recording</button>
+      <button class="btn-secondary hidden" id="stopRecBtn"><span class="rec-dot"></span>Stop Recording</button>
+      <button class="btn-primary hidden" id="uploadBtn">Upload to Drive</button>
+      <button class="btn-secondary hidden" id="retakeBtn">Retake</button>
+      <div id="uploadMsg"></div>
+    </div>
+  </div>
+</div>
+<script>
+let accessToken = null;
+let tokenClient = null;
+let tokenExpiryAt = 0;          // epoch ms — proactively refresh before this
+let signedIn = false;
+let matchedOrder = null;        // {orderId, trackingNumber, rowIndex}
+let mediaStream = null;
+let mediaRecorder = null;
+let recordedChunks = [];
+let recordedBlob = null;
+
+// ---------- Station / operator persistence ----------
+const stationSelect = document.getElementById('stationSelect');
+CONFIG.STATION_NAMES.forEach(s => {
+  const opt = document.createElement('option');
+  opt.value = s; opt.textContent = s;
+  stationSelect.appendChild(opt);
+});
+stationSelect.value = localStorage.getItem('dwps_station') || CONFIG.STATION_NAMES[0];
+stationSelect.onchange = () => localStorage.setItem('dwps_station', stationSelect.value);
+
+const operatorInput = document.getElementById('operatorInput');
+operatorInput.value = localStorage.getItem('dwps_operator') || '';
+operatorInput.oninput = () => localStorage.setItem('dwps_operator', operatorInput.value);
+
+// ---------- Google Sign-In + token lifecycle ----------
+window.onload = () => {
+  google.accounts.id.initialize({ client_id: CONFIG.CLIENT_ID, callback: () => {} });
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: CONFIG.CLIENT_ID,
+    scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file',
+    callback: () => {} // overridden per-call in requestToken()
+  });
+
+  const btn = document.createElement('button');
+  btn.textContent = 'Sign in with Google';
+  btn.className = 'btn-primary';
+  btn.style.maxWidth = '260px';
+  btn.onclick = () => requestToken(true).then(onSignedIn).catch(err => alert('Sign-in failed: ' + (err.error || err.message || err)));
+  document.getElementById('gsiButton').appendChild(btn);
+
+  setInterval(() => {
+    if (!signedIn) return;
+    if (Date.now() > tokenExpiryAt - 5 * 60 * 1000) {
+      requestToken(false).catch(() => {
+        showSessionBanner('Your session is about to expire — click to stay signed in.', true);
+      });
+    }
+  }, 60 * 1000);
+};
+
+function requestToken(interactive) {
+  return new Promise((resolve, reject) => {
+    tokenClient.callback = (resp) => {
+      if (resp.error) { reject(resp); return; }
+      accessToken = resp.access_token;
+      const expiresInSec = Number(resp.expires_in) || 55 * 60;
+      tokenExpiryAt = Date.now() + expiresInSec * 1000;
+      clearSessionBanner();
+      resolve(resp);
+    };
+    tokenClient.requestAccessToken({ prompt: interactive ? 'consent' : '' });
+  });
+}
+
+function onSignedIn() {
+  signedIn = true;
+  document.getElementById('signinCard').classList.add('hidden');
+  document.getElementById('appCard').classList.remove('hidden');
+}
+
+function showSessionBanner(text, actionable) {
+  const el = document.getElementById('sessionBanner');
+  el.innerHTML = `<div class="msg warn" ${actionable ? 'style="cursor:pointer;"' : ''}>${text}</div>`;
+  if (actionable) {
+    el.onclick = () => requestToken(true).then(() => showSessionBanner('Session refreshed.', false));
+  }
+}
+function clearSessionBanner() { document.getElementById('sessionBanner').innerHTML = ''; }
+
+function authHeader() {
+  return { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' };
+}
+
+async function apiFetch(url, options) {
+  let res = await fetch(url, options);
+  if (res.status === 401) {
+    try {
+      await requestToken(false);
+      const retryOptions = Object.assign({}, options, {
+        headers: Object.assign({}, options.headers, { 'Authorization': 'Bearer ' + accessToken })
+      });
+      res = await fetch(url, retryOptions);
+    } catch (e) {
+      showSessionBanner('Your session expired — click to sign in again.', true);
+      throw new Error('Session expired. Please sign in again.');
+    }
+  }
+  return res;
+}
+
+// ---------- Sheets helpers ----------
+async function sheetsGet(range) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.SPREADSHEET_ID}/values/${encodeURIComponent(range)}`;
+  const r = await apiFetch(url, { headers: authHeader() });
+  if (!r.ok) throw new Error('Sheets read failed: ' + (await r.text()));
+  return (await r.json()).values || [];
+}
+async function sheetsUpdate(range, values) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.SPREADSHEET_ID}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
+  const r = await apiFetch(url, { method: 'PUT', headers: authHeader(), body: JSON.stringify({ values }) });
+  if (!r.ok) throw new Error('Sheets update failed: ' + (await r.text()));
+}
+async function sheetsAppend(sheetName, row) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${CONFIG.SPREADSHEET_ID}/values/${encodeURIComponent(sheetName)}:append?valueInputOption=USER_ENTERED`;
+  const r = await apiFetch(url, { method: 'POST', headers: authHeader(), body: JSON.stringify({ values: [row] }) });
+  if (!r.ok) throw new Error('Sheets append failed: ' + (await r.text()));
+}
+function showMsg(elId, text, ok) {
+  const el = document.getElementById(elId);
+  el.innerHTML = `<div class="msg ${ok ? 'ok' : 'error'}">${text}</div>`;
+  if (!ok) playBuzzer();
+}
+
+function playBuzzer() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(190, ctx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(70, ctx.currentTime + 0.45);
+    g.gain.setValueAtTime(0.28, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(); o.stop(ctx.currentTime + 0.5);
+  } catch (e) {}
+}
+
+// ---------- 1. Verify scan (ports scanTracking() logic) ----------
+document.getElementById('verifyBtn').onclick = async () => {
+  const tracking = document.getElementById('trackingInput').value.trim();
+  const station = stationSelect.value;
+  const operator = operatorInput.value.trim();
+  document.getElementById('verifyMsg').innerHTML = '';
+  document.getElementById('recordCard').classList.add('hidden');
+  if (!tracking) { showMsg('verifyMsg', 'Please scan the AWB tracking number.', false); return; }
+  if (!operator) { showMsg('verifyMsg', 'Please enter operator name.', false); return; }
+  if (CONFIG.SPREADSHEET_ID.startsWith('PASTE_')) { showMsg('verifyMsg', 'Spreadsheet ID not configured yet.', false); return; }
+
+  const verifyBtn = document.getElementById('verifyBtn');
+  verifyBtn.disabled = true;
+  try {
+    const rows = await sheetsGet('Orders!A2:L');
+    let rowIndex = -1, order = null;
+    for (let i = 0; i < rows.length; i++) {
+      if ((rows[i][1] || '').trim() === tracking) { rowIndex = i + 2; order = rows[i]; break; }
+    }
+    if (rowIndex === -1) {
+      await sheetsAppend('ScanLog', [new Date().toISOString(), station, operator, tracking, '', 'NOT_FOUND', '', '']);
+      showMsg('verifyMsg', 'Tracking number not found in packing list.', false);
+      return;
+    }
+    const status = order[3];
+    const orderId = order[0];
+    if (status === 'Packed' || status === 'Packing') {
+      showMsg('verifyMsg', `Already packed (or currently being packed). Order ${orderId} cannot be packed again.`, false);
+      return;
+    }
+    if (status === 'Conflict') {
+      showMsg('verifyMsg', 'This order has a conflict — needs supervisor review.', false);
+      return;
+    }
+    if (status === 'Exception') {
+      showMsg('verifyMsg', 'This order is flagged as an exception — needs supervisor review.', false);
+      return;
+    }
+    if (status !== 'Sorted') {
+      showMsg('verifyMsg', `Not yet sorted. Order ${orderId} must go through the Sorting station first.`, false);
+      return;
+    }
+
+    const lockTimestamp = new Date().toISOString();
+    await sheetsUpdate(`Orders!D${rowIndex}:G${rowIndex}`, [[ 'Packing', station, operator, lockTimestamp ]]);
+
+    const recheck = await sheetsGet(`Orders!E${rowIndex}:G${rowIndex}`);
+    const recheckRow = recheck[0] || [];
+    if (recheckRow[0] !== station || recheckRow[1] !== operator || recheckRow[2] !== lockTimestamp) {
+      showMsg('verifyMsg', 'This order was just claimed by another station at the same moment. Please scan a different order.', false);
+      return;
+    }
+
+    await sheetsAppend('ScanLog', [new Date().toISOString(), station, operator, tracking, orderId, 'MATCH_OK', orderId, '']);
+    matchedOrder = { orderId, trackingNumber: tracking, rowIndex };
+    showMsg('verifyMsg', `Match found — Order ${orderId}. Please confirm this matches the item in hand, then record.`, true);
+    document.getElementById('recordCard').classList.remove('hidden');
+    await startCamera();
+  } catch (err) {
+    showMsg('verifyMsg', 'Error: ' + err.message, false);
+  } finally {
+    verifyBtn.disabled = false;
+  }
+};
+
+// ---------- 2. Camera (video only — no audio) ----------
+async function startCamera() {
+  const preview = document.getElementById('preview');
+  document.getElementById('uploadMsg').innerHTML = '';
+  document.getElementById('uploadBtn').classList.add('hidden');
+  document.getElementById('retakeBtn').classList.add('hidden');
+  document.getElementById('stopRecBtn').classList.add('hidden');
+  document.getElementById('startRecBtn').classList.remove('hidden');
+  recordedChunks = []; recordedBlob = null;
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24, max: 30 } },
+      audio: false
+    });
+    preview.srcObject = mediaStream;
+    preview.muted = true;
+  } catch (err) {
+    showMsg('uploadMsg', 'Camera access denied or unavailable: ' + err.message, false);
+  }
+}
+document.getElementById('startRecBtn').onclick = () => {
+  recordedChunks = [];
+  const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9')
+    ? 'video/webm;codecs=vp9'
+    : 'video/webm;codecs=vp8';
+  mediaRecorder = new MediaRecorder(mediaStream, {
+    mimeType: mimeType,
+    videoBitsPerSecond: 1500000
+  });
+  mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+  mediaRecorder.onstop = () => {
+    recordedBlob = new Blob(recordedChunks, { type: 'video/webm' });
+    const preview = document.getElementById('preview');
+    preview.srcObject = null;
+    preview.src = URL.createObjectURL(recordedBlob);
+    preview.muted = true;
+    document.getElementById('uploadBtn').classList.remove('hidden');
+    document.getElementById('retakeBtn').classList.remove('hidden');
+  };
+  mediaRecorder.start();
+  document.getElementById('startRecBtn').classList.add('hidden');
+  document.getElementById('stopRecBtn').classList.remove('hidden');
+};
+document.getElementById('stopRecBtn').onclick = () => {
+  mediaRecorder.stop();
+  mediaStream.getTracks().forEach(t => t.stop());
+  document.getElementById('stopRecBtn').classList.add('hidden');
+};
+document.getElementById('retakeBtn').onclick = startCamera;
+
+async function moveFileToFolder(fileId, targetFolderId) {
+  const getRes = await apiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=parents&supportsAllDrives=true`, {
+    headers: authHeader()
+  });
+  if (!getRes.ok) throw new Error('Could not read file location: ' + (await getRes.text()));
+  const fileInfo = await getRes.json();
+  const currentParents = (fileInfo.parents || []).join(',');
+
+  let patchUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?addParents=${targetFolderId}&fields=id,parents&supportsAllDrives=true`;
+  if (currentParents) patchUrl += `&removeParents=${currentParents}`;
+
+  const patchRes = await apiFetch(patchUrl, { method: 'PATCH', headers: authHeader() });
+  if (!patchRes.ok) throw new Error('Could not move file into the shared folder: ' + (await patchRes.text()));
+  return await patchRes.json();
+}
+
+// ---------- 3. Upload to Drive + confirm (ports confirmVideoUploaded()) ----------
+document.getElementById('uploadBtn').onclick = async () => {
+  if (!recordedBlob || !matchedOrder) return;
+  const uploadBtn = document.getElementById('uploadBtn');
+  uploadBtn.disabled = true;
+  showMsg('uploadMsg', 'Uploading to Drive…', true);
+  try {
+    const fileName = `${matchedOrder.orderId}_${matchedOrder.trackingNumber}_${Date.now()}.webm`;
+    const metadata = { name: fileName };
+    if (CONFIG.DRIVE_FOLDER_ID) metadata.parents = [CONFIG.DRIVE_FOLDER_ID];
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+    form.append('file', recordedBlob);
+    const uploadRes = await apiFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink,parents&supportsAllDrives=true', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + accessToken },
+      body: form
+    });
+    if (!uploadRes.ok) throw new Error(await uploadRes.text());
+    const fileData = await uploadRes.json();
+
+    if (CONFIG.DRIVE_FOLDER_ID) {
+      const alreadyInFolder = (fileData.parents || []).includes(CONFIG.DRIVE_FOLDER_ID);
+      if (!alreadyInFolder) {
+        showMsg('uploadMsg', 'Moving video into shared folder…', true);
+        await moveFileToFolder(fileData.id, CONFIG.DRIVE_FOLDER_ID);
+      }
+    }
+
+    await sheetsUpdate(`Orders!D${matchedOrder.rowIndex}:D${matchedOrder.rowIndex}`, [[ 'Packed' ]]);
+    await sheetsUpdate(`Orders!H${matchedOrder.rowIndex}:J${matchedOrder.rowIndex}`, [[ new Date().toISOString(), fileData.id, fileData.webViewLink ]]);
+    await sheetsAppend('ScanLog', [new Date().toISOString(), stationSelect.value, operatorInput.value, matchedOrder.trackingNumber, matchedOrder.orderId, 'PACKED', matchedOrder.orderId, '']);
+    showMsg('uploadMsg', `Done — video saved to Drive and order marked Packed.`, true);
+    setTimeout(() => {
+      document.getElementById('trackingInput').value = '';
+      document.getElementById('recordCard').classList.add('hidden');
+      document.getElementById('verifyMsg').innerHTML = '';
+      matchedOrder = null;
+      uploadBtn.disabled = false;
+      document.getElementById('trackingInput').focus();
+    }, 1800);
+  } catch (err) {
+    showMsg('uploadMsg', 'Upload failed: ' + err.message + ' — please retry.', false);
+    uploadBtn.disabled = false;
+  }
+};
+</script>
+</body>
+</html>
