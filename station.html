@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DWPS — Packing Station (TEST)</title>
+<title>DWPS — Packing Station</title>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root{
@@ -43,18 +43,23 @@
   .rec-dot{display:inline-block; width:10px; height:10px; background:var(--danger); border-radius:50%; margin-right:6px; animation:pulse 1s infinite;}
   @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
   #sessionBanner{position:sticky; top:0; z-index:10; margin-bottom:12px;}
+  a.navlink{color:var(--blue); text-decoration:none; font-weight:600; font-size:14px;}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>📦 DWPS — Packing Station <span style="font-size:12px; color:#b5670c; font-weight:700;">TEST</span></h1>
+  <div style="text-align:center; margin-bottom:10px;">
+    <a class="navlink" id="homeLink" href="#">← Back to Home</a>
+  </div>
+  <h1>📦 DWPS — Packing Station</h1>
   <!-- ============ CONFIG — edit before uploading ============ -->
   <script>
     const CONFIG = {
       CLIENT_ID: "635342812462-2a5m5u03fgj8tkm02vpvrii9ma7ljc1j.apps.googleusercontent.com",
-      SPREADSHEET_ID: "1-XBs3AFmqG4lMkU7LYQvukuMbu_vvCjH0c7vPpV1gk8",
+      SPREADSHEET_ID: "1JMK7kB6FA2XmieLJ4wCGokSzTyBBCpSraUQbqwagZb4",
       STATION_NAMES: ["Station 1","Station 2","Station 3","Station 4","Station 5"],
-      DRIVE_FOLDER_ID: "10T6saln6svtLEL5kk-sFa8Dyno4Yebg8"
+      DRIVE_FOLDER_ID: "1goutE3sQup_EXJzwsOdd45mr0VJDGy39", // Packing Videos folder — all uploads land here
+      HOME_URL: "PASTE_YOUR_APPS_SCRIPT_WEB_APP_EXEC_URL_HERE" // e.g. https://script.google.com/.../exec — the "Back to Home" link above
     };
   </script>
   <!-- =========================================================== -->
@@ -92,6 +97,8 @@
   </div>
 </div>
 <script>
+document.getElementById('homeLink').href = CONFIG.HOME_URL;
+
 let accessToken = null;
 let tokenClient = null;
 let tokenExpiryAt = 0;          // epoch ms — proactively refresh before this
@@ -117,6 +124,10 @@ operatorInput.value = localStorage.getItem('dwps_operator') || '';
 operatorInput.oninput = () => localStorage.setItem('dwps_operator', operatorInput.value);
 
 // ---------- Google Sign-In + token lifecycle ----------
+// Access tokens from Google Identity Services expire (~1hr). A station left open
+// for a full shift WILL hit this. We proactively refresh silently in the
+// background, and any API call that still hits a 401 triggers one retry after
+// a fresh token, so a scan never fails silently mid-shift.
 window.onload = () => {
   google.accounts.id.initialize({ client_id: CONFIG.CLIENT_ID, callback: () => {} });
   tokenClient = google.accounts.oauth2.initTokenClient({
@@ -132,6 +143,8 @@ window.onload = () => {
   btn.onclick = () => requestToken(true).then(onSignedIn).catch(err => alert('Sign-in failed: ' + (err.error || err.message || err)));
   document.getElementById('gsiButton').appendChild(btn);
 
+  // Background silent-refresh check every minute; refreshes once we're within
+  // 5 minutes of expiry, well before anything would actually fail.
   setInterval(() => {
     if (!signedIn) return;
     if (Date.now() > tokenExpiryAt - 5 * 60 * 1000) {
@@ -175,6 +188,9 @@ function authHeader() {
   return { 'Authorization': 'Bearer ' + accessToken, 'Content-Type': 'application/json' };
 }
 
+// Wraps fetch: on a 401 (expired/invalid token), tries one silent refresh and
+// retries the request once before giving up. Every Sheets/Drive call in this
+// file goes through this so an expired token never just fails a scan outright.
 async function apiFetch(url, options) {
   let res = await fetch(url, options);
   if (res.status === 401) {
@@ -215,6 +231,9 @@ function showMsg(elId, text, ok) {
   if (!ok) playBuzzer();
 }
 
+// Synthesized reject buzzer (no external audio file needed) — fires on every
+// hard-stop failure (not found, not yet sorted, mismatch, camera error, upload
+// failure...) so it's unmistakable even if staff aren't looking at the screen.
 function playBuzzer() {
   try {
     const ctx = new (window.AudioContext || window.webkitAudioContext)();
@@ -230,7 +249,23 @@ function playBuzzer() {
 }
 
 // ---------- 1. Verify scan (ports scanTracking() logic) ----------
-document.getElementById('verifyBtn').onclick = async () => {
+// Auto-fires once the scanner's burst finishes — no Enter needed. Enter and
+// the Verify button both still work too, for manual entry.
+let verifyBusy = false, verifyDebounce = null;
+const trackingInputEl = document.getElementById('trackingInput');
+trackingInputEl.addEventListener('input', () => {
+  if (verifyDebounce) clearTimeout(verifyDebounce);
+  verifyDebounce = setTimeout(() => {
+    if (trackingInputEl.value.trim() && !verifyBusy) runVerify();
+  }, 180);
+});
+trackingInputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { if (verifyDebounce) clearTimeout(verifyDebounce); runVerify(); }
+});
+document.getElementById('verifyBtn').onclick = runVerify;
+
+async function runVerify() {
+  if (verifyBusy) return;
   const tracking = document.getElementById('trackingInput').value.trim();
   const station = stationSelect.value;
   const operator = operatorInput.value.trim();
@@ -240,9 +275,16 @@ document.getElementById('verifyBtn').onclick = async () => {
   if (!operator) { showMsg('verifyMsg', 'Please enter operator name.', false); return; }
   if (CONFIG.SPREADSHEET_ID.startsWith('PASTE_')) { showMsg('verifyMsg', 'Spreadsheet ID not configured yet.', false); return; }
 
+  verifyBusy = true;
   const verifyBtn = document.getElementById('verifyBtn');
   verifyBtn.disabled = true;
   try {
+    // Orders columns: A order_id, B tracking_number, C source, D status,
+    // E packing_station, F packing_operator, G packing_started_at, H packed_at,
+    // I video_file_id, J video_url, K imported_at, L notes.
+    // (M-P are the Sorting stage's own columns — written by Sorting.html /
+    // Code.gs, never touched here. The Sorted-gate check below is what
+    // enforces that an order can't be packed before it's been sorted.)
     const rows = await sheetsGet('Orders!A2:L');
     let rowIndex = -1, order = null;
     for (let i = 0; i < rows.length; i++) {
@@ -272,9 +314,15 @@ document.getElementById('verifyBtn').onclick = async () => {
       return;
     }
 
+    // Lock row to this station.
     const lockTimestamp = new Date().toISOString();
     await sheetsUpdate(`Orders!D${rowIndex}:G${rowIndex}`, [[ 'Packing', station, operator, lockTimestamp ]]);
 
+    // RACE-CONDITION CHECK: immediately re-read the row we just locked. If a
+    // different station's write landed at nearly the same instant, the last
+    // writer wins in the Sheet — re-reading tells us whether that was us.
+    // This narrows (does not perfectly eliminate) the window where two
+    // stations could both pass verification for the same AWB at once.
     const recheck = await sheetsGet(`Orders!E${rowIndex}:G${rowIndex}`);
     const recheckRow = recheck[0] || [];
     if (recheckRow[0] !== station || recheckRow[1] !== operator || recheckRow[2] !== lockTimestamp) {
@@ -290,9 +338,10 @@ document.getElementById('verifyBtn').onclick = async () => {
   } catch (err) {
     showMsg('verifyMsg', 'Error: ' + err.message, false);
   } finally {
+    verifyBusy = false;
     verifyBtn.disabled = false;
   }
-};
+}
 
 // ---------- 2. Camera (video only — no audio) ----------
 async function startCamera() {
@@ -306,7 +355,7 @@ async function startCamera() {
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 24, max: 30 } },
-      audio: false
+      audio: false // video only, no audio — matches company policy
     });
     preview.srcObject = mediaStream;
     preview.muted = true;
@@ -321,7 +370,7 @@ document.getElementById('startRecBtn').onclick = () => {
     : 'video/webm;codecs=vp8';
   mediaRecorder = new MediaRecorder(mediaStream, {
     mimeType: mimeType,
-    videoBitsPerSecond: 1500000
+    videoBitsPerSecond: 1500000 // ~1.5 Mbps — good clarity at 720p, much smaller/faster than default
   });
   mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
   mediaRecorder.onstop = () => {
@@ -329,7 +378,7 @@ document.getElementById('startRecBtn').onclick = () => {
     const preview = document.getElementById('preview');
     preview.srcObject = null;
     preview.src = URL.createObjectURL(recordedBlob);
-    preview.muted = true;
+    preview.muted = true; // no audio track anyway
     document.getElementById('uploadBtn').classList.remove('hidden');
     document.getElementById('retakeBtn').classList.remove('hidden');
   };
@@ -344,7 +393,16 @@ document.getElementById('stopRecBtn').onclick = () => {
 };
 document.getElementById('retakeBtn').onclick = startCamera;
 
+// Explicitly moves a newly-created file into the target folder. The
+// `parents` field on the initial multipart create request is NOT reliably
+// honored under the drive.file OAuth scope — the file can silently land in
+// the signed-in user's own My Drive instead of the shared folder. Re-parenting
+// as a separate step after creation is the reliable way to guarantee it ends
+// up in the right place.
 async function moveFileToFolder(fileId, targetFolderId) {
+  // supportsAllDrives=true is required on every call that touches a file living
+  // in (or being moved into) a Shared Drive — without it, Shared Drive content
+  // is invisible to the API and these calls fail outright.
   const getRes = await apiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?fields=parents&supportsAllDrives=true`, {
     headers: authHeader()
   });
@@ -381,6 +439,8 @@ document.getElementById('uploadBtn').onclick = async () => {
     if (!uploadRes.ok) throw new Error(await uploadRes.text());
     const fileData = await uploadRes.json();
 
+    // Guarantee the file actually ends up in the shared folder, regardless of
+    // whether the create request's `parents` field was honored.
     if (CONFIG.DRIVE_FOLDER_ID) {
       const alreadyInFolder = (fileData.parents || []).includes(CONFIG.DRIVE_FOLDER_ID);
       if (!alreadyInFolder) {
@@ -389,6 +449,7 @@ document.getElementById('uploadBtn').onclick = async () => {
       }
     }
 
+    // Update Orders row: D status, H packed_at, I video_file_id, J video_url
     await sheetsUpdate(`Orders!D${matchedOrder.rowIndex}:D${matchedOrder.rowIndex}`, [[ 'Packed' ]]);
     await sheetsUpdate(`Orders!H${matchedOrder.rowIndex}:J${matchedOrder.rowIndex}`, [[ new Date().toISOString(), fileData.id, fileData.webViewLink ]]);
     await sheetsAppend('ScanLog', [new Date().toISOString(), stationSelect.value, operatorInput.value, matchedOrder.trackingNumber, matchedOrder.orderId, 'PACKED', matchedOrder.orderId, '']);
